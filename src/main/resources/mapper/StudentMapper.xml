@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.wyg.dao.StudentDao">
+
+    <sql id="selectSql">
+        SELECT s_id,s_name,s_birth,s_sex FROM student
+    </sql>
+
+    <resultMap id="studentResultMap" type="com.wyg.entity.Student">
+        <id column="s_id" property="sId" jdbcType="VARCHAR"></id>
+        <result column="s_name" property="sName" jdbcType="VARCHAR"></result>
+        <result column="s_birth" property="sBirth" jdbcType="VARCHAR"></result>
+        <result column="s_sex" property="sSex" jdbcType="VARCHAR"></result>
+    </resultMap>
+
+    <!--<select id="getStudentList" resultType="com.wyg.entity.Student">
+        <include refid="selectSql"/>
+    </select>-->
+
+    <select id="getStudentList" resultMap="studentResultMap">
+        <include refid="selectSql"/>
+    </select>
+
+</mapper>

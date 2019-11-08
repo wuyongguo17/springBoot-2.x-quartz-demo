@@ -1,0 +1,143 @@
+一，springBoot 2.x版本多数据源配置流程：
+    1，继承AbstractRoutingDataSource
+        public class DynamicDataSource extends AbstractRoutingDataSource {
+            private static final ThreadLocal<String> CONTEXT_HOLDER = new ThreadLocal<>();
+
+            public DynamicDataSource(DataSource defaultTargetDataSource, Map<Object, Object> targetDataSources) {
+                super.setDefaultTargetDataSource(defaultTargetDataSource);
+                super.setTargetDataSources(targetDataSources);
+                super.afterPropertiesSet();
+            }
+
+            @Override
+            protected Object determineCurrentLookupKey() {
+                return getDataSource();
+            }
+
+            public static void setDataSource(String dataSource) {
+                CONTEXT_HOLDER.set(dataSource);
+            }
+
+            public static String getDataSource() {
+                return CONTEXT_HOLDER.get();
+            }
+
+            public static void clearDataSource() {
+                CONTEXT_HOLDER.remove();
+            }
+        }
+
+    2，使用druid连接池，yml配置
+        spring:
+          datasource:
+            type: com.alibaba.druid.pool.DruidDataSource
+            driverClassName: com.mysql.cj.jdbc.Driver
+            druid:
+              first:  #数据源1
+                url: jdbc:mysql://localhost:3306/demo?allowMultiQueries=true&useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&useSSL=false&serverTimezone=Asia/Shanghai
+                username: root
+                password: 123456
+              second:  #数据源2
+                url: jdbc:mysql://localhost:3306/test?allowMultiQueries=true&useUnicode=true&characterEncoding=UTF-8&autoReconnect=true&useSSL=false&serverTimezone=Asia/Shanghai
+                username: root
+                password: 123456
+
+
+    3，配置
+        @Configuration
+        public class DynamicDataSourceConfig {
+            @Bean
+            @ConfigurationProperties("spring.datasource.druid.first")
+            public DataSource firstDataSource() {
+                return DruidDataSourceBuilder.create().build();
+            }
+
+            @Bean
+            @ConfigurationProperties("spring.datasource.druid.second")
+            public DataSource secondDataSource() {
+                return DruidDataSourceBuilder.create().build();
+            }
+
+            @Bean
+            @Primary
+            public DynamicDataSource dataSource(DataSource firstDataSource, DataSource secondDataSource) {
+                /*
+                 * map中2个元素，与2的n次方最接近的数是2，但是这里如果设置容量为2的话 2/2=1,
+                 * 已经超过默认加载因子(0.75)的大小了。因此会resize一次，变成4。所以最优的值是4。
+                 *
+                 * https://www.cnblogs.com/tiancai/p/9558895.html
+                 */
+                Map<Object, Object> targetDataSources = new HashMap<>(4);
+                targetDataSources.put(DataSourceNames.FIRST, firstDataSource);
+                targetDataSources.put(DataSourceNames.SECOND, secondDataSource);
+                return new DynamicDataSource(firstDataSource, targetDataSources);
+            }
+        }
+
+
+    4，使用aop + 注解的思想实现动态切换
+        自定义注解：
+            @Target(ElementType.METHOD)
+            @Retention(RetentionPolicy.RUNTIME)
+            @Documented
+            public @interface DataSource {
+                String value() default "";
+            }
+
+        AOP：
+            @Slf4j
+            @Aspect
+            @Component
+            public class DataSourceAspect implements Ordered {
+
+                @Pointcut("@annotation(com.wyg.datasources.annotation.DataSource)")
+                public void dataSourcePointCut() {
+
+                }
+
+                @Around("dataSourcePointCut()")
+                public Object around(ProceedingJoinPoint point) throws Throwable {
+                    MethodSignature signature = (MethodSignature) point.getSignature();
+                    Method method = signature.getMethod();
+
+                    DataSource ds = method.getAnnotation(DataSource.class);
+                    if (ds == null) {
+                        DynamicDataSource.setDataSource(DataSourceNames.FIRST);
+                        log.debug("set datasource is " + DataSourceNames.FIRST);
+                    } else {
+                        DynamicDataSource.setDataSource(ds.value());
+                        log.debug("set datasource is " + ds.value());
+                    }
+
+                    try {
+                        return point.proceed();
+                    } finally {
+                        DynamicDataSource.clearDataSource();
+                        log.debug("clean datasource");
+                    }
+                }
+
+                @Override
+                public int getOrder() {
+                    return 1;
+                }
+            }
+
+
+    5，最重要的一点：因为数据源是自己生成的，所以要去掉原先springBoot启动时候自动装配的数据源配置。
+        @SpringBootApplication(exclude = {DataSourceAutoConfiguration.class})
+        public class QuartzDemoApplication {
+            public static void main(String[] args) {
+                SpringApplication.run(QuartzDemoApplication.class);
+            }
+        }
+
+
+     注意：数据源的切换要在事务开启之前，要不然数据源会切换失败。
+
+        AbstractRoutingDataSource 只支持单库事务，也就是说切换数据源要在开启事务之前执行。 spring DataSourceTransactionManager进行事务管理，开启事务，会将数据源缓存到DataSourceTransactionObject对象中进行后续的commit rollback等事务操作。
+        出现多数据源动态切换失败的原因是因为在事务开启后，数据源就不能再进行随意切换了，也就是说，一个事务对应一个数据源。
+
+        传统的Spring管理事务是放在Service业务层操作的，所以更换数据源的操作要放在这个操作之前进行。也就是切换数据源操作放在Controller层，可是这样操作会造成Controller层代码混乱的结果。
+
+        故而想到的解决方案是将事务管理在数据持久 (Dao层) 开启，切换数据源的操作放在业务层进行操作，就可在事务开启之前顺利进行数据源切换，不会再出现切换失败了。
